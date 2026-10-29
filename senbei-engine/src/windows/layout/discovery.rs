@@ -2,15 +2,19 @@
 
 use senbei_crypto::primitives::{get_u32, lfsr_keystream};
 
-/// Find the 4-byte v_val that follows the LAST occurrence of `48 EB 01 B9`
-/// (REX.W jmp+1; mov ecx,imm32) plus any 0xCC padding. Used to locate
-/// stage4's accum2 seed. Works across builds even when API-name anchors are
-/// absent.
-pub fn find_v_after_pad(data: &[u8], base: u32, len: u32) -> Option<u32> {
+/// Find candidate 4-byte v_val locations that follow the LAST occurrence of
+/// `48 EB 01 B9` (REX.W jmp+1; mov ecx,imm32) plus any 0xCC padding.
+/// Used to locate stage4's accum2 seed. Works across builds even when API-name
+/// anchors are absent.
+///
+/// If skipping 0xCC padding lands on an unaligned offset, the lowest byte of the
+/// seed constant itself may have been 0xCC (e.g. `0x162244CC`), so aligned
+/// candidate boundaries are also generated for trial validation.
+pub fn find_v_candidates(data: &[u8], base: u32, len: u32) -> Vec<u32> {
     let start = base as usize;
     let end = (base.saturating_add(len)) as usize;
     if end > data.len() {
-        return None;
+        return Vec::new();
     }
     let sig = [0x48u8, 0xEB, 0x01, 0xB9];
     let slice = &data[start..end];
@@ -23,16 +27,41 @@ pub fn find_v_after_pad(data: &[u8], base: u32, len: u32) -> Option<u32> {
         }
         i += 1;
     }
-    let pos = last?;
+    let Some(pos) = last else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+
     // skip CCs after the `48 EB 01 B9`
     let mut after = pos + sig.len();
     while after < slice.len() && slice[after] == 0xCC {
         after += 1;
     }
-    if after + 4 > slice.len() {
-        return None;
+
+    // If skipping CCs landed on an unaligned offset, the lowest byte of the seed
+    // constant itself may have been 0xCC. Prioritize the aligned boundary before `after`.
+    let aligned_before = after & !3;
+    if aligned_before >= pos + sig.len() && aligned_before + 4 <= slice.len() {
+        candidates.push((start + aligned_before) as u32);
     }
-    Some((start + after) as u32)
+    let after_addr = (start + after) as u32;
+    if after + 4 <= slice.len() && !candidates.contains(&after_addr) {
+        candidates.push(after_addr);
+    }
+
+    // Also include other 4-byte aligned offsets in the padding region
+    let epilogue_limit = (pos + 32).min(slice.len().saturating_sub(4));
+    let mut p = ((pos + sig.len()).saturating_add(3)) & !3;
+    while p <= epilogue_limit {
+        let addr = (start + p) as u32;
+        if !candidates.contains(&addr) {
+            candidates.push(addr);
+        }
+        p += 4;
+    }
+
+    candidates
 }
 
 /// Predict the 4 bytes that DecryptData5(va, size) would produce at va+0..va+4

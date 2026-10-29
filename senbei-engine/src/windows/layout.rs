@@ -7,7 +7,7 @@ mod image;
 pub(super) use dd8::{select_dd8_formula_pe32, select_dd8_shift};
 pub(super) use discovery::{
     discover_eighth_slots, find_bytecode_offset, find_lfsr_block, find_str_pos,
-    find_tbl_pe32_candidates, find_v_after_pad, find_v4_offset, get_string_to_null, section_name,
+    find_tbl_pe32_candidates, find_v_candidates, find_v4_offset, get_string_to_null, section_name,
     trial_decrypt5_u32,
 };
 pub(super) use image::{

@@ -861,19 +861,10 @@ impl<'a> Unpacker<'a> {
         let chk5 = u.calculate_checksum(stage1.wrapping_add(chk_src_start.wrapping_add(8)));
         // accum2 sits 4 bytes past the function-end `48 EB 01 B9` + any CC padding
         // (i.e., the 4 bytes immediately after the last instance of that pattern).
-        let v6 = find_v_after_pad(&u.decompressed, stage4_field, stage4_dlen)
-            .unwrap_or_else(|| idb_pos.wrapping_sub(24));
-        let accum2_seed = get_u32(&u.decompressed, v6);
-        let mut accum2 = accum2_seed;
-        let mut accum2_candidates = vec![(0u32, accum2_seed)];
-        for m in 0..8u32 {
-            let bound = (m + 1).wrapping_mul(25) << 2;
-            let mut i: u32 = 1;
-            while i <= bound {
-                accum2 = accum2.wrapping_add(i);
-                i = i.wrapping_add(1);
-            }
-            accum2_candidates.push((m + 1, accum2));
+        let mut seed_positions = find_v_candidates(&u.decompressed, stage4_field, stage4_dlen);
+        let idb_cand = idb_pos.wrapping_sub(24);
+        if !seed_positions.contains(&idb_cand) {
+            seed_positions.push(idb_cand);
         }
 
         let ops1 = match generate(&u.decompressed, data_offset) {
@@ -896,7 +887,6 @@ impl<'a> Unpacker<'a> {
                 "  stage5 descriptor = [0x{stage5_field:08X}, 0x{stage5_slen:08X}, 0x{stage5_dest:08X}, 0x{stage5_dlen:08X}]"
             );
             println!("  stage5 bytecode = 0x{data_offset:08X}");
-            println!("  stage5 accumulator seed = 0x{accum2_seed:08X} at 0x{v6:08X}");
         }
         let stage5_lo = stage5_field.min(stage5_dest) as usize;
         let stage5_hi = stage5_field
@@ -912,25 +902,79 @@ impl<'a> Unpacker<'a> {
             })?;
         let stage5_backup = u.decompressed[stage5_lo..stage5_hi].to_vec();
         let mut first_failure = None;
-        let mut selected_rounds = None;
-        for rounds in std::iter::once(3u32).chain((0..=8).filter(|&rounds| rounds != 3)) {
-            u.decompressed[stage5_lo..stage5_hi].copy_from_slice(&stage5_backup);
-            let candidate_accum = accum2_candidates[rounds as usize].1;
-            match u.decrypt_and_decompress_data(
-                at4,
-                xor_acc ^ chk4 ^ chk5 ^ candidate_accum,
-                Some(&ops1),
-            ) {
-                Ok(()) => {
-                    selected_rounds = Some(rounds);
-                    break;
+        let mut selected = None;
+
+        let compute_candidates = |seed: u32| {
+            let mut accum2 = seed;
+            let mut candidates = Vec::with_capacity(9);
+            candidates.push((0u32, seed));
+            for m in 0..8u32 {
+                let bound = (m + 1).wrapping_mul(25) << 2;
+                let mut i: u32 = 1;
+                while i <= bound {
+                    accum2 = accum2.wrapping_add(i);
+                    i = i.wrapping_add(1);
                 }
-                Err(reason) => {
-                    first_failure.get_or_insert(reason);
+                candidates.push((m + 1, accum2));
+            }
+            candidates
+        };
+
+        'search: for seed_pos in &seed_positions {
+            let accum2_seed = get_u32(&u.decompressed, *seed_pos);
+            if accum2_seed == 0 {
+                continue;
+            }
+            let accum2_candidates = compute_candidates(accum2_seed);
+            for rounds in std::iter::once(3u32).chain((0..=8).filter(|&rounds| rounds != 3)) {
+                u.decompressed[stage5_lo..stage5_hi].copy_from_slice(&stage5_backup);
+                let candidate_accum = accum2_candidates[rounds as usize].1;
+                match u.decrypt_and_decompress_data(
+                    at4,
+                    xor_acc ^ chk4 ^ chk5 ^ candidate_accum,
+                    Some(&ops1),
+                ) {
+                    Ok(()) => {
+                        selected = Some((*seed_pos, accum2_seed, rounds));
+                        break 'search;
+                    }
+                    Err(reason) => {
+                        first_failure.get_or_insert(reason);
+                    }
                 }
             }
         }
-        let Some(selected_rounds) = selected_rounds else {
+
+        if selected.is_none() {
+            // Broad scan over stage4 offsets if primary pattern candidates failed
+            'broad_search: for off in (0..stage4_dlen.saturating_sub(4)).step_by(4) {
+                let seed_pos = stage4_field.wrapping_add(off);
+                if seed_positions.contains(&seed_pos) {
+                    continue;
+                }
+                let accum2_seed = get_u32(&u.decompressed, seed_pos);
+                if accum2_seed == 0 {
+                    continue;
+                }
+                let accum2_candidates = compute_candidates(accum2_seed);
+                for rounds in std::iter::once(3u32).chain((0..=8).filter(|&rounds| rounds != 3)) {
+                    u.decompressed[stage5_lo..stage5_hi].copy_from_slice(&stage5_backup);
+                    let candidate_accum = accum2_candidates[rounds as usize].1;
+                    if u.decrypt_and_decompress_data(
+                        at4,
+                        xor_acc ^ chk4 ^ chk5 ^ candidate_accum,
+                        Some(&ops1),
+                    )
+                    .is_ok()
+                    {
+                        selected = Some((seed_pos, accum2_seed, rounds));
+                        break 'broad_search;
+                    }
+                }
+            }
+        }
+
+        let Some((selected_pos, selected_seed, selected_rounds)) = selected else {
             u.decompressed[stage5_lo..stage5_hi].copy_from_slice(&stage5_backup);
             return Err(UnpackError::StageDecompressionFailed {
                 stage: DecompressionStage::ExeStage5,
@@ -938,6 +982,7 @@ impl<'a> Unpacker<'a> {
             });
         };
         if verbose {
+            println!("  stage5 accumulator seed = 0x{selected_seed:08X} at 0x{selected_pos:08X}");
             println!("  selected stage5 accumulator rounds = {selected_rounds}");
         }
 
