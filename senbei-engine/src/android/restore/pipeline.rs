@@ -25,6 +25,7 @@ use senbei_elf::{
 };
 
 const CHUNK_SIZE: usize = 16 * 1024 * 1024;
+const DT_INIT: u64 = 12;
 const DT_INIT_ARRAYSZ: u64 = 27;
 const DT_FINI_ARRAYSZ: u64 = 28;
 const AARCH64_RET: u32 = 0xd65f_03c0;
@@ -681,7 +682,64 @@ fn discover_auxiliary_symbol_seed(module: &[u8]) -> Result<u32> {
 // Their GOT slots are therefore the five holes left after combining the
 // protected and auxiliary PLT relocations. Resolve the holes by call ABI rather
 // than by fixed slot numbers; the slot order differs between protected games.
-const SPECIAL_PLT_IMPORT_NAMES: [&str; 5] = ["strlen", "strcmp", "memset", "strcpy", "strchr"];
+const SPECIAL_PLT_IMPORT_NAMES: [&str; 6] = [
+    "strlen", "strcmp", "memset", "strcpy", "strchr", "strcat",
+];
+
+fn special_plt_name_by_id(id: u32) -> Option<&'static str> {
+    match id {
+        3 => Some("memset"),
+        4 => Some("strcat"),
+        5 => Some("strchr"),
+        6 => Some("strcmp"),
+        7 => Some("strcpy"),
+        8 => Some("strlen"),
+        _ => None,
+    }
+}
+
+fn parse_special_plt_module(
+    data: &[u8],
+    first_slot: u64,
+    slot_count: usize,
+    missing: &[usize],
+) -> Result<Vec<(usize, &'static str)>> {
+    if !data.len().is_multiple_of(8) || data.len() / 8 != missing.len() {
+        return invalid(format!(
+            "module 0xB9 size 0x{:x} does not match {} unresolved GOT.PLT slots",
+            data.len(),
+            missing.len()
+        ));
+    }
+    let missing_set = missing.iter().copied().collect::<HashSet<_>>();
+    let mut seen_slots = HashSet::with_capacity(missing.len());
+    let mut seen_names = HashSet::with_capacity(missing.len());
+    let mut result = Vec::with_capacity(missing.len());
+    for chunk in data.chunks_exact(8) {
+        let id = read_u32(chunk, 0)?;
+        let rva = u64::from(read_u32(chunk, 4)?);
+        let name = special_plt_name_by_id(id).ok_or_else(|| {
+            Error::Invalid(format!("module 0xB9 contains unknown special PLT id {id}"))
+        })?;
+        if rva < first_slot || !(rva - first_slot).is_multiple_of(8) {
+            return invalid(format!(
+                "module 0xB9 target 0x{rva:x} is not a valid .got.plt slot"
+            ));
+        }
+        let slot = usize_from_u64((rva - first_slot) / 8, "module 0xB9 slot")?;
+        if slot >= slot_count || !missing_set.contains(&slot) {
+            return invalid(format!(
+                "module 0xB9 slot {slot} (0x{rva:x}) is not an unresolved .got.plt slot"
+            ));
+        }
+        if !seen_slots.insert(slot) || !seen_names.insert(name) {
+            return invalid("module 0xB9 contains duplicate special PLT records");
+        }
+        result.push((slot, name));
+    }
+    result.sort_by_key(|(slot, _)| *slot);
+    Ok(result)
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct PltCallFeatures {
@@ -843,15 +901,15 @@ fn plt_call_features(image: &[u8], layout: &ElfLayout, target: u64) -> Result<Pl
 fn classify_special_plt_slots(
     candidates: &[(usize, PltCallFeatures)],
 ) -> Result<Vec<(usize, &'static str)>> {
-    if candidates.len() != SPECIAL_PLT_IMPORT_NAMES.len() {
+    if !(5..=SPECIAL_PLT_IMPORT_NAMES.len()).contains(&candidates.len()) {
         return invalid(format!(
-            "expected {} unresolved special PLT slots, found {}",
+            "expected 5..={} unresolved special PLT slots, found {}",
             SPECIAL_PLT_IMPORT_NAMES.len(),
             candidates.len()
         ));
     }
     let mut remaining = candidates.to_vec();
-    let mut result = Vec::with_capacity(SPECIAL_PLT_IMPORT_NAMES.len());
+    let mut result = Vec::with_capacity(candidates.len());
     let mut take_unique =
         |name: &'static str, predicate: &dyn Fn(PltCallFeatures) -> bool| -> Result<()> {
             let matches = remaining
@@ -876,7 +934,7 @@ fn classify_special_plt_slots(
         features.calls != 0 && features.w0_zero_branch * 2 > features.calls
     })?;
     take_unique("strchr", &|features| {
-        features.calls != 0 && features.pointer_zero_branch_with_immediate_arg1 == features.calls
+        features.calls != 0 && features.pointer_zero_branch_with_immediate_arg1 != 0
     })?;
     take_unique("strlen", &|features| features.x0_to_x2 != 0)?;
     if remaining.len() != 1 {
@@ -1213,6 +1271,7 @@ fn discover_special_plt_imports(
     names: &[String],
     old_plt: &[Rela],
     auxiliary_plt: &[Rela],
+    special_plt_module: Option<&[u8]>,
 ) -> Result<Vec<(usize, &'static str)>> {
     let plt_index = names
         .iter()
@@ -1258,9 +1317,9 @@ fn discover_special_plt_imports(
     if missing.is_empty() {
         return Ok(Vec::new());
     }
-    if missing.len() != SPECIAL_PLT_IMPORT_NAMES.len() {
+    if !(5..=SPECIAL_PLT_IMPORT_NAMES.len()).contains(&missing.len()) {
         return invalid(format!(
-            ".got.plt has {} unresolved slots, expected {} special libc imports",
+            ".got.plt has {} unresolved slots, expected 5..={} special libc imports",
             missing.len(),
             SPECIAL_PLT_IMPORT_NAMES.len()
         ));
@@ -1281,6 +1340,9 @@ fn discover_special_plt_imports(
             plt.size
         ));
     }
+    if let Some(module_data) = special_plt_module {
+        return parse_special_plt_module(module_data, first_slot, slot_count, &missing);
+    }
     let mut candidates = Vec::with_capacity(missing.len());
     for slot in missing {
         let target = first_plt
@@ -1289,6 +1351,56 @@ fn discover_special_plt_imports(
         candidates.push((slot, plt_call_features(image, layout, target)?));
     }
     classify_special_plt_slots(&candidates)
+}
+
+fn dynamic_tag_value(output: &[u8], dynamic: SectionHeader, wanted: u64) -> Result<Option<u64>> {
+    if !dynamic.size.is_multiple_of(0x10) {
+        return invalid(".dynamic size is not entry-aligned");
+    }
+    let start = usize_from_u64(dynamic.offset, ".dynamic offset")?;
+    let size = usize_from_u64(dynamic.size, ".dynamic size")?;
+    let end = start
+        .checked_add(size)
+        .ok_or_else(|| Error::Invalid(".dynamic end overflow".to_owned()))?;
+    slice(output, start, size)?;
+    for offset in (start..end).step_by(0x10) {
+        let tag = read_u64(output, offset)?;
+        if tag == wanted {
+            return Ok(Some(read_u64(output, offset + 8)?));
+        }
+        if tag == 0 {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+fn remove_dynamic_tag(output: &mut [u8], dynamic: SectionHeader, unwanted: u64) -> Result<()> {
+    if !dynamic.size.is_multiple_of(0x10) {
+        return invalid(".dynamic size is not entry-aligned");
+    }
+    let start = usize_from_u64(dynamic.offset, ".dynamic offset")?;
+    let size = usize_from_u64(dynamic.size, ".dynamic size")?;
+    let end = start
+        .checked_add(size)
+        .ok_or_else(|| Error::Invalid(".dynamic end overflow".to_owned()))?;
+    slice(output, start, size)?;
+    let mut write_cursor = start;
+    for offset in (start..end).step_by(0x10) {
+        let tag = read_u64(output, offset)?;
+        let value = read_u64(output, offset + 8)?;
+        if tag == 0 {
+            break;
+        }
+        if tag == unwanted {
+            continue;
+        }
+        output[write_cursor..write_cursor + 8].copy_from_slice(&tag.to_le_bytes());
+        output[write_cursor + 8..write_cursor + 0x10].copy_from_slice(&value.to_le_bytes());
+        write_cursor += 0x10;
+    }
+    output[write_cursor..end].fill(0);
+    Ok(())
 }
 
 fn patch_dynamic_tags(
@@ -1593,6 +1705,7 @@ fn materialize_static_elf_tables(
     auxiliary_data: &[u8],
     auxiliary_symbol_seed: Option<u32>,
     constructor_module: Option<(&[u8], u32)>,
+    special_plt_module: Option<&[u8]>,
 ) -> Result<(ElfLayout, ElfMaterializationReport, u64)> {
     let names = layout.section_names(source)?;
     let indices = required_section_indices(&names)?;
@@ -1616,7 +1729,7 @@ fn materialize_static_elf_tables(
 
     let auxiliary = AuxiliaryElfImage::parse(auxiliary_data)?;
     let old_names = dynamic_symbol_names(&old_symbols, &old_strings)?;
-    let protector_names = ["dlerror", "__stack_chk_guard", "__stack_chk_fail"];
+    let protector_names = ["dlerror", "dladdr", "__stack_chk_guard", "__stack_chk_fail"];
     let protector_tail_start = usize::try_from(hidden_symbols.last_target_index.saturating_add(1))
         .map_err(|_| Error::Invalid("protector symbol index exceeds usize".to_owned()))?;
     let protector_symbol_range = if protector_tail_start < source_symbol_count {
@@ -1750,27 +1863,41 @@ fn materialize_static_elf_tables(
         &names,
         &old_plt_relocations,
         &auxiliary2_relocations,
+        special_plt_module,
     )?;
     let existing_names = dynamic_symbol_names(&merged_symbols, &merged_strings)?;
-    for &name in &SPECIAL_PLT_IMPORT_NAMES {
-        if existing_names
-            .iter()
-            .any(|existing| existing.as_slice() == name.as_bytes())
-            && special_imports.iter().any(|(_, special)| *special == name)
-        {
-            return invalid(format!(
-                "special PLT import {name} already exists in the dynamic symbol table"
-            ));
-        }
-    }
     let mut special_plt_symbols = Vec::with_capacity(special_imports.len());
+    let mut special_appended_count = 0_usize;
     for &(slot, name) in &special_imports {
-        let symbol =
-            append_undefined_function_symbol(&mut merged_symbols, &mut merged_strings, name)?;
-        merged_versions.extend_from_slice(&VER_NDX_GLOBAL.to_le_bytes());
+        let mut reused = None;
+        for (index, existing) in existing_names.iter().enumerate().skip(1) {
+            if existing.as_slice() == name.as_bytes() {
+                let (section_index, _) = symbol_definition(&merged_symbols, index)?;
+                if section_index != 0 {
+                    return invalid(format!(
+                        "special PLT import {name} conflicts with a defined symbol in the dynamic symbol table"
+                    ));
+                }
+                reused = Some(index);
+                break;
+            }
+        }
+        let symbol = match reused {
+            Some(index) => index,
+            None => {
+                let index = append_undefined_function_symbol(
+                    &mut merged_symbols,
+                    &mut merged_strings,
+                    name,
+                )?;
+                merged_versions.extend_from_slice(&VER_NDX_GLOBAL.to_le_bytes());
+                special_appended_count += 1;
+                index
+            }
+        };
         special_plt_symbols.push((slot, symbol));
     }
-    let appended_count = auxiliary_appended_count + special_plt_symbols.len();
+    let appended_count = auxiliary_appended_count + special_appended_count;
     let merged_names = dynamic_symbol_names(&merged_symbols, &merged_strings)?;
     let sysv_hash = indices
         .contains_key(".hash")
@@ -1783,17 +1910,9 @@ fn materialize_static_elf_tables(
     let new_symbol_count = merged_names.len();
     let new_dynstr_size = merged_strings.len();
 
+    let mut remove_dt_init = false;
     let constructors = match constructor_module {
         Some(module) => {
-            let init_index = names
-                .iter()
-                .position(|name| name == ".init_array")
-                .ok_or_else(|| {
-                    Error::Invalid(
-                        "constructor control module 0x98 is present but .init_array is missing"
-                            .to_owned(),
-                    )
-                })?;
             let fini_index = names
                 .iter()
                 .position(|name| name == ".fini_array")
@@ -1803,12 +1922,28 @@ fn materialize_static_elf_tables(
                             .to_owned(),
                     )
                 })?;
-            let init_array = layout.section_headers[init_index];
             let fini_array = layout.section_headers[fini_index];
-            let profile = constructor_profile(
-                module, output, source, layout, init_array, fini_array, old_dyn,
-            )?;
-            Some((profile, init_index, fini_index, init_array, fini_array))
+            if let Some(init_index) = names.iter().position(|name| name == ".init_array") {
+                let init_array = layout.section_headers[init_index];
+                let profile = constructor_profile(
+                    module, output, source, layout, init_array, fini_array, old_dyn,
+                )?;
+                Some((profile, init_index, fini_index, init_array, fini_array))
+            } else {
+                let dt_init = dynamic_tag_value(output, dynamic, DT_INIT)?.ok_or_else(|| {
+                    Error::Invalid(
+                        "constructor control module 0x98 is present without .init_array or DT_INIT"
+                            .to_owned(),
+                    )
+                })?;
+                if !is_stage1_constructor(source, layout, dt_init) {
+                    return invalid(
+                        "DT_INIT does not point to a validated Stage 1 constructor bootstrap",
+                    );
+                }
+                remove_dt_init = true;
+                None
+            }
         }
         None => None,
     };
@@ -2143,6 +2278,9 @@ fn materialize_static_elf_tables(
         dynamic_values.insert(DT_HASH, section_address(".hash"));
     }
     patch_dynamic_tags(output, dynamic, &dynamic_values)?;
+    if remove_dt_init {
+        remove_dynamic_tag(output, dynamic, DT_INIT)?;
+    }
 
     let mut restored_layout = placement_layout;
     restored_layout.section_headers = updated_sections;
@@ -2392,6 +2530,10 @@ pub fn restore_libil2cpp(options: &RestoreOptions) -> Result<RestoreReport> {
             Ok((read_file(&artifact.path)?, entry))
         })
         .transpose()?;
+    let special_plt_module = artifacts
+        .get(&0xb9)
+        .map(|artifact| read_file(&artifact.path))
+        .transpose()?;
     let config = Module9bConfig::parse(&module)?;
 
     let input_file = File::open(&input_path)
@@ -2546,6 +2688,7 @@ pub fn restore_libil2cpp(options: &RestoreOptions) -> Result<RestoreReport> {
                 constructor_module
                     .as_ref()
                     .map(|(image, entry)| (image.as_slice(), *entry)),
+                special_plt_module.as_deref(),
             )?;
             restored_layout = new_layout;
             materialization = Some(report);
