@@ -40,7 +40,9 @@ use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
 pub use crate::METADATA_FILE_NAME;
+use crate::message::Coded;
 use crate::report::{ContainerReport, ManifestReport};
+use senbei_i18n::Msg;
 
 /// Package extensions recognised as Android app packages. Packages are
 /// *containers*: membership is decided by extension plus the ZIP magic, while
@@ -114,7 +116,9 @@ pub fn inspect_package(package: &Path, limits: &ResourceLimits) -> Result<Contai
             continue;
         }
         let Some(name) = name else {
-            bail!("unsafe entry path in package `{}`", package.display());
+            bail!(Coded::new(Msg::UnsafePackageEntry {
+                package: package.display().to_string(),
+            }));
         };
         if bundle {
             if name
@@ -198,6 +202,66 @@ pub fn inspect_package(package: &Path, limits: &ResourceLimits) -> Result<Contai
         candidate_entries,
         nested_packages,
     })
+}
+
+/// The bytes of one package entry, named by its report label.
+///
+/// `label` is an entry name as a package report writes it: `<package>::<entry>`
+/// for an APK, `<package>\<nested.apk>::<entry>` inside a bundle. Only the
+/// named entry (and, in a bundle, the nested APK holding it) is extracted, under
+/// the same archive ceilings as a restore.
+pub fn read_package_entry(package: &Path, label: &str, limits: &ResourceLimits) -> Result<Vec<u8>> {
+    let (outer, inner) = label
+        .rsplit_once("::")
+        .with_context(|| format!("`{label}` names no package entry"))?;
+    let bundle = package
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            value.eq_ignore_ascii_case("apks") || value.eq_ignore_ascii_case("xapk")
+        });
+    let temporary = tempfile::tempdir().context("create entry workspace")?;
+    let mut budget = archive_limits::ArchiveBudget::from_limits(limits);
+    let mut archive = budget.open_archive(package)?;
+    let entry_index = |archive: &mut ZipArchive<archive_limits::ArchiveReader>,
+                       wanted: &dyn Fn(&Path) -> bool|
+     -> Result<Option<(usize, PathBuf)>> {
+        for index in 0..archive.len() {
+            let entry = archive.by_index(index)?;
+            if entry.is_dir() {
+                continue;
+            }
+            if let Some(name) = entry.enclosed_name()
+                && wanted(&name)
+            {
+                return Ok(Some((index, name)));
+            }
+        }
+        Ok(None)
+    };
+    let names = |name: &Path, label: &str| name.display().to_string() == label;
+    let path = if bundle {
+        // The nested APK is the top-level entry the label's package part ends with.
+        let (index, name) = entry_index(&mut archive, &|name: &Path| {
+            let name = name.display().to_string();
+            outer.ends_with(&name) && outer[..outer.len() - name.len()].ends_with(['\\', '/'])
+        })?
+        .with_context(|| format!("`{outer}` is not in `{}`", package.display()))?;
+        limits.check_depth(1)?;
+        let nested_path = extract_entry(&mut archive, index, &temporary, &name, &mut budget)
+            .with_context(|| format!("extract `{}`", name.display()))?;
+        let mut nested = budget.open_archive(&nested_path)?;
+        let (index, name) = entry_index(&mut nested, &|name: &Path| names(name, inner))?
+            .with_context(|| format!("`{inner}` is not in `{outer}`"))?;
+        extract_entry(&mut nested, index, &temporary, &name, &mut budget)
+            .with_context(|| format!("extract `{label}`"))?
+    } else {
+        let (index, name) = entry_index(&mut archive, &|name: &Path| names(name, inner))?
+            .with_context(|| format!("`{inner}` is not in `{}`", package.display()))?;
+        extract_entry(&mut archive, index, &temporary, &name, &mut budget)
+            .with_context(|| format!("extract `{label}`"))?
+    };
+    std::fs::read(&path).with_context(|| format!("read extracted `{label}`"))
 }
 
 fn manifest_report(source: &str, inventory: &context::PackageInventory) -> ManifestReport {
@@ -642,7 +706,7 @@ pub(crate) fn restore_loose_metadata(
             ),
             Err(ambiguity) => {
                 let provenance = context::provenance_for(modules.as_ref(), Some(&ambiguity));
-                bail!(provenance_error(&provenance));
+                bail!(provenance_error(&provenance, &ambiguity));
             }
         }
     } else {
@@ -657,7 +721,7 @@ pub(crate) fn restore_loose_metadata(
     if report.remapped > 0 {
         write_metadata_blob(dest, &out)?;
         if verbose {
-            println!("Write to {}", dest.display());
+            crate::ui::write_to(dest, false);
         }
     }
     Ok(LooseMetadataOutcome {
@@ -995,7 +1059,7 @@ pub(crate) fn restore_metadata_with_module(
         // version" and could be mistaken for a clean skip. No module is a
         // failed binding, not an unsupported layout.
         let Some(module) = method_index_module else {
-            let error = anyhow::anyhow!("no module 0x0C for v24.1 metadata");
+            let error = anyhow::Error::new(Coded::new(Msg::NoModule0c));
             return Err(fail(&mut facts, error));
         };
         let (out, report) = senbei_metadata::android::restore_method_indices_v24_1(data, module)
@@ -1335,7 +1399,9 @@ fn restore_package_pass<R: context::LibraryRestorer>(
             continue;
         }
         let Some(name) = name else {
-            bail!("unsafe entry path in package `{}`", package.display());
+            bail!(Coded::new(Msg::UnsafePackageEntry {
+                package: package.display().to_string(),
+            }));
         };
         if bundle {
             if name
@@ -1436,7 +1502,9 @@ fn restore_package_pass<R: context::LibraryRestorer>(
             };
             if !is_dir {
                 let Some(entry_name) = entry_name else {
-                    bail!("unsafe entry path in `{}`", nested_label.display());
+                    bail!(Coded::new(Msg::UnsafeNestedEntry {
+                        path: nested_label.display().to_string(),
+                    }));
                 };
                 if is_android_entry_name(&entry_name) {
                     entries.push((nested_index, entry_name));
@@ -1617,7 +1685,8 @@ fn restore_package_entry<R: Read + Seek, T: context::LibraryRestorer>(
                                 status: EntryStatus::Restored,
                                 provenance: Vec::new(),
                                 layout: None,
-                                metadata_version: None,
+                                metadata_version: senbei_metadata::identify(blob)
+                                    .map(|identity| identity.raw_version),
                                 validation: None,
                                 research: None,
                                 metadata_research: None,
@@ -1674,7 +1743,10 @@ fn restore_package_entry<R: Read + Seek, T: context::LibraryRestorer>(
                 let provenance = context::provenance_for(modules.as_ref(), Some(&ambiguity));
                 return Ok(vec![outcome(
                     EntryKind::Metadata { remapped: 0 },
-                    EntryStatus::Failed(anyhow::anyhow!(provenance_error(&provenance))),
+                    EntryStatus::Failed(anyhow::Error::new(provenance_error(
+                        &provenance,
+                        &ambiguity,
+                    ))),
                     provenance_labels(&provenance),
                 )]);
             }
@@ -1792,13 +1864,20 @@ fn provenance_labels(provenance: &context::MetadataProvenance) -> Vec<String> {
         .collect()
 }
 
-fn provenance_error(provenance: &context::MetadataProvenance) -> String {
+fn provenance_error(
+    provenance: &context::MetadataProvenance,
+    ambiguity: &context::ContextAmbiguity,
+) -> Coded {
+    let msg = match ambiguity {
+        context::ContextAmbiguity::Missing => Msg::NoModule0c,
+        context::ContextAmbiguity::Conflicting { .. } => Msg::AmbiguousModule0c,
+    };
     let why = provenance
         .note
         .clone()
         .unwrap_or_else(|| "ambiguous module 0x0C binding".to_owned());
     if provenance.sources.is_empty() {
-        return why;
+        return Coded::with_text(msg, why);
     }
     let sources = provenance
         .sources
@@ -1806,7 +1885,7 @@ fn provenance_error(provenance: &context::MetadataProvenance) -> String {
         .map(|source| source.label.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    format!("{why}; modules from {sources}")
+    Coded::with_text(msg, format!("{why}; modules from {sources}"))
 }
 
 /// Output path for a metadata blob unwrapped from a restored library: next to

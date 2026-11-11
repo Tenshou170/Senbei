@@ -1,6 +1,7 @@
 use senbei_crypto::bytecode::{Op, OpsLut, generate};
 use senbei_crypto::primitives;
 use senbei_crypto::primitives::*;
+use senbei_i18n::Step;
 
 use super::super::error::*;
 use super::super::layout::{self, *};
@@ -362,15 +363,15 @@ impl<'a> Unpacker<'a> {
             0x1004,
         );
         if verbose {
-            println!("[1/9] Decrypting file header...");
-            println!("  info[0] key        = 0x{:08X}", u.info[0]);
-            println!("  info[1] signature  = 0x{:08X}", u.info[1]);
-            println!("  info[2]            = 0x{:08X}", u.info[2]);
-            println!("  info[3] base       = 0x{:08X}", u.info[3]);
-            println!("  info[4] src_off    = 0x{:08X}", u.info[4]);
-            println!("  info[5] total_size = 0x{:08X}", u.info[5]);
-            println!("  info[6] end_mark   = 0x{:08X}", u.info[6]);
-            println!("  info[7]            = 0x{:08X}", u.info[7]);
+            crate::progress::step(1, 9, Step::DecryptHeader);
+            crate::progress::detail(format_args!("  info[0] key        = 0x{:08X}", u.info[0]));
+            crate::progress::detail(format_args!("  info[1] signature  = 0x{:08X}", u.info[1]));
+            crate::progress::detail(format_args!("  info[2]            = 0x{:08X}", u.info[2]));
+            crate::progress::detail(format_args!("  info[3] base       = 0x{:08X}", u.info[3]));
+            crate::progress::detail(format_args!("  info[4] src_off    = 0x{:08X}", u.info[4]));
+            crate::progress::detail(format_args!("  info[5] total_size = 0x{:08X}", u.info[5]));
+            crate::progress::detail(format_args!("  info[6] end_mark   = 0x{:08X}", u.info[6]));
+            crate::progress::detail(format_args!("  info[7]            = 0x{:08X}", u.info[7]));
         }
         if !super::super::is_supported_magic(u.info[1]) {
             return Err(UnpackError::HeaderMagicMismatch { found: u.info[1] });
@@ -409,7 +410,7 @@ impl<'a> Unpacker<'a> {
             u.info[5] as u64,
         );
         if verbose {
-            println!("[2/9] Decrypting payload...");
+            crate::progress::step(2, 9, Step::DecryptPayload);
         }
         let pe32_table = u.load_payload();
         research::emit_u32(ResearchStage::Payload, "prefix_length", u.decrypt_size);
@@ -432,7 +433,7 @@ impl<'a> Unpacker<'a> {
             return u.run_pe32(pe_off, table, verbose);
         }
 
-        // The config block layout in the decrypted region varies between Crackproof
+        // The config block layout in the decrypted region varies between CrackProof
         // versions. Find the anchor field — a dword equal to info[3], immediately
         // followed by 0x28 and then info[6]-0x200 — and derive every other field
         // offset relative to it. Observed anchor positions: +6728 (older EXE
@@ -505,8 +506,8 @@ impl<'a> Unpacker<'a> {
         );
 
         if verbose {
-            println!("  anchor = 0x{anchor:08X}");
-            println!("  anchor layout offset = +0x{anchor_extra:X}");
+            crate::progress::detail(format_args!("  anchor = 0x{anchor:08X}"));
+            crate::progress::detail(format_args!("  anchor layout offset = +0x{anchor_extra:X}"));
         }
 
         let p1 = get_u32(&u.decompressed, anchor.wrapping_add(8));
@@ -555,17 +556,19 @@ impl<'a> Unpacker<'a> {
             stage1_descriptor.to_vec(),
         );
         if verbose {
-            println!("[3/9] Locating config layout...");
-            println!("  stage1 = 0x{:08X}", stage1);
-            println!("  stage1_len = 0x{stage1_len:08X}");
-            println!(
+            crate::progress::step(3, 9, Step::LocateConfig);
+            crate::progress::detail(format_args!("  stage1 = 0x{:08X}", stage1));
+            crate::progress::detail(format_args!("  stage1_len = 0x{stage1_len:08X}"));
+            crate::progress::detail(format_args!(
                 "  stage1 descriptor = [0x{:08X}, 0x{:08X}]",
                 stage1_descriptor[0], stage1_descriptor[1]
-            );
-            println!("  stage1 key = xor 0x{xor_acc:08X} ^ chk 0x{chk1:08X} ^ val 0x{v:08X}");
+            ));
+            crate::progress::detail(format_args!(
+                "  stage1 key = xor 0x{xor_acc:08X} ^ chk 0x{chk1:08X} ^ val 0x{v:08X}"
+            ));
         }
 
-        // Field offsets inside stage1 vary between Crackproof versions. Locate
+        // Field offsets inside stage1 vary between CrackProof versions. Locate
         // stage2 (the only 16-byte entry where dword[0]==dword[2], dword[1] is the
         // large encrypted size and dword[3] is a smaller decompressed size), then
         // derive every other field as fixed offsets from there. Observed
@@ -653,14 +656,16 @@ impl<'a> Unpacker<'a> {
             chk_src_start,
         );
         if verbose {
-            println!("[4/9] Decrypting stage2...");
-            println!("  stage2 = 0x{:08X}", stage2);
-            println!("  stage2_off = 0x{stage2_off:04X}");
-            println!("  checksum table = stage1+0x{chk_src_start:04X}");
-            println!("  stage2 key = 0x{key2:08X}");
+            crate::progress::step(4, 9, Step::DecryptStage2);
+            crate::progress::detail(format_args!("  stage2 = 0x{:08X}", stage2));
+            crate::progress::detail(format_args!("  stage2_off = 0x{stage2_off:04X}"));
+            crate::progress::detail(format_args!(
+                "  checksum table = stage1+0x{chk_src_start:04X}"
+            ));
+            crate::progress::detail(format_args!("  stage2 key = 0x{key2:08X}"));
         }
 
-        // The stage2 head/walk2 tables shift between Crackproof versions. The 4-entry
+        // The stage2 head/walk2 tables shift between CrackProof versions. The 4-entry
         // table starts with a `kind=1, 0, info[3], 0` 16-byte entry; head is two
         // entries (32 bytes) past that, walk2 sits 88 bytes before head. Observed
         // table_start: 9136 (older EXE builds) and 9216 (another old-layout build
@@ -690,17 +695,21 @@ impl<'a> Unpacker<'a> {
         let head_off = table_start.wrapping_add(32);
         let walk2_off = head_off.wrapping_sub(88);
         if verbose {
-            println!("  operation table = stage2+0x{table_start:04X}");
-            println!("  head/walk = +0x{head_off:04X}/+0x{walk2_off:04X}");
+            crate::progress::detail(format_args!(
+                "  operation table = stage2+0x{table_start:04X}"
+            ));
+            crate::progress::detail(format_args!(
+                "  head/walk = +0x{head_off:04X}/+0x{walk2_off:04X}"
+            ));
             for index in 0..2u32 {
                 let entry = stage2.wrapping_add(head_off + index * 16);
-                println!(
+                crate::progress::detail(format_args!(
                     "  operation[{index}] = [0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}]",
                     get_u32(&u.decompressed, entry),
                     get_u32(&u.decompressed, entry.wrapping_add(4)),
                     get_u32(&u.decompressed, entry.wrapping_add(8)),
                     get_u32(&u.decompressed, entry.wrapping_add(12)),
-                );
+                ));
             }
         }
 
@@ -751,10 +760,10 @@ impl<'a> Unpacker<'a> {
             u.key_offsets.to_vec(),
         );
         if verbose {
-            println!(
+            crate::progress::detail(format_args!(
                 "  key offsets = [0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}]",
                 u.key_offsets[0], u.key_offsets[1], u.key_offsets[2], u.key_offsets[3]
-            );
+            ));
         }
 
         let chk2 = u.calculate_checksum(anchor.wrapping_add(48 + anchor_extra));
@@ -779,13 +788,15 @@ impl<'a> Unpacker<'a> {
         let stage3_dest = get_u32(&u.decompressed, at1.wrapping_add(8));
         let stage3_dlen = get_u32(&u.decompressed, at1.wrapping_add(12));
         if verbose {
-            println!("[5/9] Decrypting stages 3-5...");
-            println!("  stage3  = 0x{:08X}", stage3_field);
-            println!(
+            crate::progress::step(5, 9, Step::DecryptStages3To5);
+            crate::progress::detail(format_args!("  stage3  = 0x{:08X}", stage3_field));
+            crate::progress::detail(format_args!(
                 "  stage3 descriptor = [0x{stage3_field:08X}, 0x{stage3_slen:08X}, 0x{stage3_dest:08X}, 0x{stage3_dlen:08X}]"
-            );
-            println!("  stage3 key = xor 0x{xor_acc:08X} ^ chk 0x{chk2:08X} ^ val 0x{accum:08X}");
-            println!("  stage3 accum seed = 0x{accum_seed:08X}");
+            ));
+            crate::progress::detail(format_args!(
+                "  stage3 key = xor 0x{xor_acc:08X} ^ chk 0x{chk2:08X} ^ val 0x{accum:08X}"
+            ));
+            crate::progress::detail(format_args!("  stage3 accum seed = 0x{accum_seed:08X}"));
         }
         let stage3_key = xor_acc ^ chk2 ^ accum;
         research::emit_range(
@@ -858,7 +869,9 @@ impl<'a> Unpacker<'a> {
                     rounds,
                 );
                 if verbose {
-                    println!("  selected stage3 accumulator rounds = {rounds}");
+                    crate::progress::detail(format_args!(
+                        "  selected stage3 accumulator rounds = {rounds}"
+                    ));
                 }
             } else {
                 restore_stage3(&mut u.decompressed);
@@ -873,7 +886,7 @@ impl<'a> Unpacker<'a> {
         let stage3b_field = get_u32(&u.decompressed, at2);
         let stage3b_dlen = get_u32(&u.decompressed, at2.wrapping_add(12));
         if verbose {
-            println!("  stage3b = 0x{:08X}", stage3b_field);
+            crate::progress::detail(format_args!("  stage3b = 0x{:08X}", stage3b_field));
         }
         let chk3 = u.calculate_checksum(stage1.wrapping_add(chk_src_start.wrapping_add(24)));
         // v4_val lives at the end of stage3, immediately following `C3 CC CC CC`
@@ -903,7 +916,7 @@ impl<'a> Unpacker<'a> {
         let stage4_field = get_u32(&u.decompressed, at3);
         let stage4_dlen = get_u32(&u.decompressed, at3.wrapping_add(12));
         if verbose {
-            println!("  stage4  = 0x{:08X}", stage4_field);
+            crate::progress::detail(format_args!("  stage4  = 0x{:08X}", stage4_field));
         }
         if let Err(reason) = u.decrypt_and_decompress_data(at3, xor_acc ^ chk4 ^ v5_val, None) {
             return Err(UnpackError::StageDecompressionFailed {
@@ -979,11 +992,11 @@ impl<'a> Unpacker<'a> {
         let stage5_dest = get_u32(&u.decompressed, at4.wrapping_add(8));
         let stage5_dlen = get_u32(&u.decompressed, at4.wrapping_add(12));
         if verbose {
-            println!("  stage5  = 0x{:08X}", stage5_field);
-            println!(
+            crate::progress::detail(format_args!("  stage5  = 0x{:08X}", stage5_field));
+            crate::progress::detail(format_args!(
                 "  stage5 descriptor = [0x{stage5_field:08X}, 0x{stage5_slen:08X}, 0x{stage5_dest:08X}, 0x{stage5_dlen:08X}]"
-            );
-            println!("  stage5 bytecode = 0x{data_offset:08X}");
+            ));
+            crate::progress::detail(format_args!("  stage5 bytecode = 0x{data_offset:08X}"));
         }
         let stage5_lo = stage5_field.min(stage5_dest) as usize;
         let stage5_hi = stage5_field
@@ -1091,8 +1104,12 @@ impl<'a> Unpacker<'a> {
             stage5_dlen as u64,
         );
         if verbose {
-            println!("  stage5 accumulator seed = 0x{selected_seed:08X} at 0x{selected_pos:08X}");
-            println!("  selected stage5 accumulator rounds = {selected_rounds}");
+            crate::progress::detail(format_args!(
+                "  stage5 accumulator seed = 0x{selected_seed:08X} at 0x{selected_pos:08X}"
+            ));
+            crate::progress::detail(format_args!(
+                "  selected stage5 accumulator rounds = {selected_rounds}"
+            ));
         }
 
         // Inside stage5, the loader stores a table of (ptr, size) pairs at a
@@ -1230,10 +1247,10 @@ impl<'a> Unpacker<'a> {
                         Ok(next) => chain_crc = next,
                         Err(UnpackError::ExeChecksumRangeOutOfBounds { .. }) => {
                             if verbose {
-                                println!(
+                                crate::progress::detail(format_args!(
                                     "  checksum chain terminates at 0x{:08X}: descriptor payload is outside protected input",
                                     walk3.wrapping_sub(16)
-                                );
+                                ));
                             }
                             break;
                         }
@@ -1245,18 +1262,18 @@ impl<'a> Unpacker<'a> {
                 }
             }
             if verbose {
-                println!("[6/9] Decrypting section data...");
-                println!(
+                crate::progress::step(6, 9, Step::DecryptSections);
+                crate::progress::detail(format_args!(
                     "  integrity  = 0x{:08X}",
                     get_u32(u.file_data, 56).wrapping_add(1985229329)
-                );
-                println!("  chain_crc  = 0x{:08X}", chain_crc);
+                ));
+                crate::progress::detail(format_args!("  chain_crc  = 0x{:08X}", chain_crc));
             }
             for (addr, bytes) in walk3_backups {
                 u.decompressed[addr..addr + 16].copy_from_slice(&bytes);
             }
         } else if verbose {
-            println!("[6/9] Decrypting section data (new layout)...");
+            crate::progress::step(6, 9, Step::DecryptSectionsNewLayout);
         }
 
         let data_offset2 = bc2_off;
@@ -1300,7 +1317,7 @@ impl<'a> Unpacker<'a> {
 
         let at6 = walk4_slot;
         if verbose {
-            println!("[7/9] Loading and decompressing sections...");
+            crate::progress::step(7, 9, Step::LoadSections);
         }
         let mut walk4 = get_u32(&u.decompressed, at6);
         // Pass 1 (sequential): the 16-byte descriptors are decrypted in a
@@ -1447,7 +1464,7 @@ impl<'a> Unpacker<'a> {
 
         let at7 = walk5_slot;
         if verbose {
-            println!("[8/9] Decrypting import strings...");
+            crate::progress::step(8, 9, Step::DecryptImports);
         }
         // walk5 is the old layout's encrypted import-name pointer table. The new
         // layout has no such table — imports are rebuilt from the PE Import
@@ -1509,7 +1526,7 @@ impl<'a> Unpacker<'a> {
         } // end !new_layout (walk5)
 
         if verbose {
-            println!("[9/9] Reconstructing PE headers...");
+            crate::progress::step(9, 9, Step::RebuildHeaders);
         }
         u.decompressed[..4096].copy_from_slice(&u.file_data[..4096]);
         let opt_hdr_size = get_u16(u.file_data, pe_off.wrapping_add(20));
@@ -1644,7 +1661,7 @@ impl<'a> Unpacker<'a> {
                 }
             }
         }
-        // EP/DD layout in info[3] varies between Crackproof versions. Old
+        // EP/DD layout in info[3] varies between CrackProof versions. Old
         // layout: EP at info[3]+64, ImageBase at info[3]+68, DD[0..15] at
         // info[3]+80..info[3]+208 — total 144 bytes encrypted starting at +64.
         // New layout: everything shifts 32 bytes earlier — EP at info[3]+32,
@@ -1836,7 +1853,7 @@ impl<'a> Unpacker<'a> {
 
         // Old-layout managed (CLR) restore: same verbatim regions as the
         // new-layout restore above (COR20 header + BSJB MetaData stream) plus
-        // the COR20 resources blob. Crackproof preserves only these regions
+        // the COR20 resources blob. CrackProof preserves only these regions
         // verbatim in the protected file — the IL method bodies between the
         // COR20 header and the resources ARE packer-encrypted and arrive via
         // the section-block pass, so copying the whole section's raw data (as
@@ -1889,7 +1906,7 @@ impl<'a> Unpacker<'a> {
             }
         }
 
-        // The payload's TLS directory (DD[9]) arrives blanked: Crackproof strips
+        // The payload's TLS directory (DD[9]) arrives blanked: CrackProof strips
         // the struct and re-installs TLS itself when it maps the module. Prefer
         // recovering the real one from the stub's plaintext `.rdata` — dropping
         // DD[9] leaves `_tls_index` unwritten, so every `thread_local` access
@@ -2221,7 +2238,7 @@ impl<'a> Unpacker<'a> {
     /// Restore the genuine `IMAGE_TLS_DIRECTORY32` — and the raw-data template
     /// it points at — from the loader stub.
     ///
-    /// Crackproof zeroes the TLS directory struct inside the encrypted payload
+    /// CrackProof zeroes the TLS directory struct inside the encrypted payload
     /// and re-installs TLS itself when it maps the module, so a statically
     /// unpacked image reaches the ordinary Windows loader with a blank struct.
     /// Synthesizing a placeholder (empty template, index/callbacks aimed at

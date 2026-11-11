@@ -1,10 +1,11 @@
 use senbei_engine::detect;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use walkdir::WalkDir;
 
 /// Bytes read per file for content detection. `detect` inspects the DOS/PE
-/// header and the Crackproof key table at offset 4096; its deepest read is the
+/// header and the CrackProof key table at offset 4096; its deepest read is the
 /// key-table dword at 4124 (so a candidate must be ≥ 4128 bytes) or the PE
 /// data-directory field at `e_lfanew + 252`, which is far below 8 KiB for any
 /// real PE (`e_lfanew` is a few hundred bytes). `is_metadata` needs only the
@@ -16,7 +17,7 @@ const DETECT_PREFIX: u64 = 8 * 1024;
 /// Smallest file that can possibly be a target, so anything shorter is skipped
 /// without ever being opened.
 ///
-/// A Crackproof module needs ≥ 4128 bytes for [`senbei_engine::detect`]'s key
+/// A CrackProof module needs ≥ 4128 bytes for [`senbei_engine::detect`]'s key
 /// table (it reads the dword at 4124), so the bound is exact for the unpack
 /// path. An il2cpp `global-metadata.dat` only needs 4 bytes to match its magic,
 /// but its header alone runs to offset 0xB0 and the images/types/methods tables
@@ -34,10 +35,10 @@ fn is_metadata_name(path: &Path) -> bool {
 /// Content classification of a single file.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Class {
-    /// Neither a Crackproof module nor il2cpp metadata — left untouched.
+    /// Neither a CrackProof module nor il2cpp metadata — left untouched.
     None,
-    /// A Crackproof-protected PE (unpack target).
-    Crackproof,
+    /// A CrackProof-protected PE (unpack target).
+    CrackProof,
     /// An il2cpp `global-metadata.dat` (de-obfuscation target).
     Metadata,
     /// A protected AArch64 shared library (Android restore target).
@@ -50,7 +51,7 @@ enum Class {
 /// Everything one [`find_targets_opts`] walk found, plus non-target tallies.
 #[derive(Default)]
 pub struct ScanResult {
-    /// Crackproof-protected PE files.
+    /// CrackProof-protected PE files.
     pub crackproof: Vec<PathBuf>,
     /// il2cpp `global-metadata.dat` blobs.
     pub metadata: Vec<PathBuf>,
@@ -62,7 +63,7 @@ pub struct ScanResult {
 }
 
 /// Walk `root` recursively (skipping any directory literally named `"unpack"`)
-/// and return, **in walk order**, the Crackproof candidates and the il2cpp
+/// and return, **in walk order**, the CrackProof candidates and the il2cpp
 /// metadata blobs found — from a *single* traversal that opens each file at
 /// most once.
 ///
@@ -125,6 +126,26 @@ pub fn find_targets_with_limits(
     root: &Path,
     scan_all: bool,
     limits: &senbei_engine::android::ResourceLimits,
+) -> ScanResult {
+    find_targets_inner(root, scan_all, limits, None)
+}
+
+/// [`find_targets_with_limits`], counting targets into `found` as the content
+/// probe classifies them, so a front end can show the scan's progress.
+pub fn find_targets_counted(
+    root: &Path,
+    scan_all: bool,
+    limits: &senbei_engine::android::ResourceLimits,
+    found: &AtomicUsize,
+) -> ScanResult {
+    find_targets_inner(root, scan_all, limits, Some(found))
+}
+
+fn find_targets_inner(
+    root: &Path,
+    scan_all: bool,
+    limits: &senbei_engine::android::ResourceLimits,
+    found: Option<&AtomicUsize>,
 ) -> ScanResult {
     // Phase 1: serial traversal collecting regular-file paths only. No file is
     // opened here; `readdir` is fast relative to the content probe that follows,
@@ -190,17 +211,27 @@ pub fn find_targets_with_limits(
     let n = paths.len();
     let mut class: Vec<Option<Class>> = vec![Some(Class::None); n];
     let workers = senbei_engine::thread_cap().clamp(1, n.max(1));
+    let classify_counted = |path: &Path| {
+        let class = classify(path, limits);
+        if let Some(found) = found
+            && matches!(class, Some(c) if c != Class::None)
+        {
+            found.fetch_add(1, Ordering::Relaxed);
+        }
+        class
+    };
     if workers <= 1 {
         for (p, c) in paths.iter().zip(class.iter_mut()) {
-            *c = classify(p, limits);
+            *c = classify_counted(p);
         }
     } else {
         let chunk = n.div_ceil(workers);
+        let classify_counted = &classify_counted;
         std::thread::scope(|scope| {
             for (pc, cc) in paths.chunks(chunk).zip(class.chunks_mut(chunk)) {
                 scope.spawn(move || {
                     for (p, c) in pc.iter().zip(cc.iter_mut()) {
-                        *c = classify(p, limits);
+                        *c = classify_counted(p);
                     }
                 });
             }
@@ -213,7 +244,7 @@ pub fn find_targets_with_limits(
     };
     for (p, c) in paths.into_iter().zip(class) {
         match c {
-            Some(Class::Crackproof) => result.crackproof.push(p),
+            Some(Class::CrackProof) => result.crackproof.push(p),
             Some(Class::Metadata) => result.metadata.push(p),
             Some(Class::AndroidSo) => result.android_so.push(p),
             Some(Class::AndroidPackage) => result.android_packages.push(p),
@@ -247,7 +278,7 @@ pub fn scan_all_env() -> bool {
 /// re-raises on join, before any per-file isolation exists). The default panic
 /// hook still prints the message, keeping the bug diagnosable.
 ///
-/// A Crackproof PE never matches the metadata magic (it is a PE, not a
+/// A CrackProof PE never matches the metadata magic (it is a PE, not a
 /// metadata blob) and vice versa, so the order is immaterial.
 ///
 /// The Android library probe needs more than the prefix: the protection
@@ -264,7 +295,7 @@ fn classify(path: &Path, limits: &senbei_engine::android::ResourceLimits) -> Opt
             return Class::Metadata;
         }
         if crate::windows::is_pe_extension(path) && detect(&head).is_some() {
-            return Class::Crackproof;
+            return Class::CrackProof;
         }
         if crate::android::is_so_name(path)
             && crate::android::is_elf64_aarch64(&head)
@@ -275,6 +306,55 @@ fn classify(path: &Path, limits: &senbei_engine::android::ResourceLimits) -> Opt
         Class::None
     }));
     r.ok()
+}
+
+/// What one input is, judged the way a single-file run dispatches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputClass {
+    /// An il2cpp metadata blob, recognized by its magic.
+    Metadata,
+    /// A protected AArch64 shared library.
+    AndroidLibrary,
+    /// An Android app package (`.apk`/`.apks`/`.xapk`).
+    AndroidPackage,
+    /// A CrackProof-protected PE.
+    Windows,
+    /// None of these. A single-file run reports it as not protected.
+    NotTarget,
+}
+
+/// Classify one input the way a single-file run would dispatch it, reading its
+/// first 8 KiB (and, for an AArch64 ELF, the section table the probe needs).
+///
+/// Unlike a folder scan, a single-file run is not bound to target filenames: a
+/// metadata blob is recognized by its magic, whatever it is called.
+pub fn classify_input(
+    path: &Path,
+    limits: &senbei_engine::android::ResourceLimits,
+) -> std::io::Result<InputClass> {
+    let file = std::fs::File::open(path)?;
+    let mut head = Vec::with_capacity(DETECT_PREFIX as usize);
+    file.take(DETECT_PREFIX).read_to_end(&mut head)?;
+    let class = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if senbei_metadata::is_metadata(&head) {
+            return InputClass::Metadata;
+        }
+        if crate::android::is_elf64_aarch64(&head) {
+            return if crate::android::probe_so_file_with_limits(path, limits).unwrap_or(true) {
+                InputClass::AndroidLibrary
+            } else {
+                InputClass::NotTarget
+            };
+        }
+        if crate::android::is_app_package(path, &head) {
+            return InputClass::AndroidPackage;
+        }
+        if detect(&head).is_some() {
+            return InputClass::Windows;
+        }
+        InputClass::NotTarget
+    }));
+    Ok(class.unwrap_or(InputClass::NotTarget))
 }
 
 /// Read up to `max` bytes from the start of `path`. Returns `None` on any I/O
@@ -337,7 +417,7 @@ mod tests {
         assert!(exhaustive.metadata.is_empty());
     }
 
-    /// A selected file below the Crackproof key-table bound is skipped without
+    /// A selected file below the CrackProof key-table bound is skipped without
     /// being opened, while `scan_all` probes it.
     #[test]
     fn prefilter_skips_small_selected_files_only() {
@@ -347,7 +427,7 @@ mod tests {
         std::fs::write(root.join("assets.ab"), vec![0u8; 100_000]).unwrap();
         std::fs::write(root.join("plain.dll"), vec![0u8; 100_000]).unwrap();
 
-        // None of them are Crackproof, so both modes find nothing; the point is
+        // None of them are CrackProof, so both modes find nothing; the point is
         // that only the selected names are considered and `scan_all` controls
         // the size floor.
         let scan = find_targets_opts(root, false);

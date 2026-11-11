@@ -157,7 +157,11 @@ fn kind_str(kind: senbei_engine::Kind) -> &'static str {
 /// Copy an integrity report's findings into the parallel arrays the JS layer
 /// reads (`issues[i]` and `severities[i]` describe the same defect).
 fn split_findings(report: &IntegrityReport) -> (Vec<String>, Vec<String>, bool) {
-    let issues = report.issues.clone();
+    let issues: Vec<String> = report
+        .issues
+        .iter()
+        .map(|issue| issue.to_string())
+        .collect();
     let mut severities = Vec::with_capacity(report.findings.len());
     let mut fatal = false;
     for finding in &report.findings {
@@ -223,7 +227,7 @@ pub fn inspect_profile_json(input: &[u8]) -> String {
 /// `input` is the protected `.exe`/`.dll`; `companion` is the optional
 /// `<input>._` external-companion payload (pass `null`/`undefined` when there
 /// is none). Throws a string error when the input is not a supported
-/// Crackproof file or is corrupt.
+/// CrackProof file or is corrupt.
 #[wasm_bindgen]
 pub fn unpack_file(input: &[u8], companion: Option<Vec<u8>>) -> Result<UnpackResult, JsError> {
     let r = senbei_io::job::unpack_bytes(input, companion.as_deref())
@@ -325,7 +329,7 @@ fn metadata_outcome(data: &[u8]) -> (Option<u32>, ProtectionProfile, MetadataTra
                 layout: route,
                 outcome: AttemptOutcome::Failed,
                 warnings: Vec::new(),
-                errors: vec![error.to_string()],
+                errors: vec![error.to_string().into()],
             }];
             profile.recovery = RecoveryStatus::Failed;
             profile.push_error(error.to_string());

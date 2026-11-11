@@ -2,7 +2,7 @@
 
 A static unpacker for CrackProof-protected Windows PE files and Android AArch64 shared libraries.
 
-> _"Crackproof"? It's senbei (煎餅 — rice cracker). Cracks itself._
+> _"CrackProof"? It's senbei (煎餅 — rice cracker). Cracks itself._
 
 ## Usage
 
@@ -15,6 +15,14 @@ senbei "C:\Games\MyGame"
 
 Outputs are written below an `unpack` directory unless `--out` is supplied.
 
+Launch the native desktop app:
+
+```cmd
+cargo run --release -p senbei-gui
+```
+
+The native release workflow packages the CLI and desktop app together for Windows and Linux. The desktop app supports files and folders, Android libraries and app packages, inspection, hex views, and report export.
+
 Full documentation: <https://xn--ri8h.gitbook.io/crackproof-research/senbei>
 
 ## Legal notice and intended use
@@ -26,7 +34,7 @@ Full documentation: <https://xn--ri8h.gitbook.io/crackproof-research/senbei>
 - Senbei does not bypass any access control for you: it performs a purely static transformation of a file already on your disk. It derives everything it needs from the input file itself, contains no vendor code, and distributes no cracks or copyrighted content. (One Android packaging variant's embedded metadata layer is unwrapped with an XOR keystream recovered from a ciphertext/plaintext pair during analysis of a single build; that keystream is research output shipped with the unpacker, not a vendor-distributed key, and builds it doesn't match are left alone.)
 - Senbei does not enable online play, license fraud, or cheating, and must not be used to redistribute decrypted binaries. Do not upload outputs anywhere.
 - The authors provide this software "as is", without warranty of any kind, and accept no liability for misuse. See [LICENSE](LICENSE) (AGPL-3.0).
-- "Crackproof" is a trademark of its respective owner; this project is not affiliated with or endorsed by the protection vendor or any software publisher. Names are used for identification only.
+- "CrackProof" is a trademark of its respective owner; this project is not affiliated with or endorsed by the protection vendor or any software publisher. Names are used for identification only.
 
 ## License
 

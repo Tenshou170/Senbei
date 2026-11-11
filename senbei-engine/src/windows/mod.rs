@@ -10,6 +10,7 @@ pub(crate) mod parallel;
 pub mod research;
 
 use senbei_crypto::primitives;
+use senbei_i18n::Message;
 use serde::Serialize;
 
 use crate::profile::{
@@ -78,10 +79,10 @@ where
     }
 }
 
-/// Crackproof header magic stored in `keys[1]`/`info[1]`.
+/// CrackProof header magic stored in `keys[1]`/`info[1]`.
 pub(crate) const MAGIC_KONN: u32 = 0x4E4E4F4B; // b"KONN" little-endian (= 1313754955)
 
-/// True if `magic` is the Crackproof magic this unpacker supports.
+/// True if `magic` is the CrackProof magic this unpacker supports.
 pub(crate) fn is_supported_magic(magic: u32) -> bool {
     magic == MAGIC_KONN
 }
@@ -105,7 +106,7 @@ pub struct Detected {
 // Content-based detection
 // ---------------------------------------------------------------------------
 
-/// Derive the 8-element Crackproof key table from the header at offset 4096.
+/// Derive the 8-element CrackProof key table from the header at offset 4096.
 /// Returns `None` if the input is too short or doesn't have a valid PE signature.
 fn key_table(input: &[u8]) -> Option<[u32; 8]> {
     // Need at least 4128 bytes: the key-table loop below reads dwords up to
@@ -124,7 +125,7 @@ fn key_table(input: &[u8]) -> Option<[u32; 8]> {
     if &input[pe_start..pe_start + 4] != b"PE\0\0" {
         return None;
     }
-    // Derive 8 keys per the Crackproof header-key formula.
+    // Derive 8 keys per the CrackProof header-key formula.
     let mut keys = [0u32; 8];
     keys[0] = primitives::get_u32(input, 4096);
     let mut k = keys[0];
@@ -136,10 +137,10 @@ fn key_table(input: &[u8]) -> Option<[u32; 8]> {
     Some(keys)
 }
 
-/// Detect whether `input` is a Crackproof-protected binary and classify it.
+/// Detect whether `input` is a CrackProof-protected binary and classify it.
 /// Returns `None` if the magic doesn't match.
 ///
-/// Routing: `keys[1]` must be the Crackproof magic (`KONN`).
+/// Routing: `keys[1]` must be the CrackProof magic (`KONN`).
 /// The PE IMAGE_FILE_DLL characteristic distinguishes EXE vs DLL;
 /// the CLR data-directory RVA distinguishes managed from native for both.
 pub fn detect(input: &[u8]) -> Option<Detected> {
@@ -209,7 +210,7 @@ pub fn unpack_auto(input: &[u8]) -> Result<(Kind, Vec<u8>), UnpackError> {
 /// Like [`unpack_auto`], but prints detailed `[N/9]` unpack-step progress to
 /// stdout when `verbose` is true. Output bytes are identical regardless.
 pub fn unpack_auto_v(input: &[u8], verbose: bool) -> Result<(Kind, Vec<u8>), UnpackError> {
-    let detected = detect(input).ok_or(UnpackError::NotCrackproof)?;
+    let detected = detect(input).ok_or(UnpackError::NotCrackProof)?;
     let out = match detected.kind {
         Kind::NativeExe | Kind::ManagedExe => unpack_exe_v(input, verbose)?,
         Kind::NativeDll | Kind::ManagedDll => select_dll_layout(
@@ -308,8 +309,8 @@ pub fn unpack_auto_profiled_v(
     let detected = detect(input);
     let mut profile = inspect_detected(input, detected);
     let Some(detected) = detected else {
-        let error = UnpackError::NotCrackproof;
-        profile.push_error(error.to_string());
+        let error = UnpackError::NotCrackProof;
+        profile.push_error(error.message());
         return (profile, Err(error));
     };
     let result = match detected.kind {
@@ -342,8 +343,8 @@ pub fn unpack_exe_profiled_v(
     let detected = detect(input);
     let mut profile = inspect_detected(input, detected);
     if detected.is_none() {
-        let error = UnpackError::NotCrackproof;
-        profile.push_error(error.to_string());
+        let error = UnpackError::NotCrackProof;
+        profile.push_error(error.message());
         return (profile, Err(error));
     }
     // This entry point will never run the DLL route, so a DLL-kind detection's
@@ -383,10 +384,10 @@ fn run_exe_attempt(
                 LayoutKind::ExeStyle,
                 AttemptOutcome::Failed,
                 Vec::new(),
-                vec![error.to_string()],
+                vec![error.message()],
             );
             profile.recovery = RecoveryStatus::Failed;
-            profile.push_error(error.to_string());
+            profile.push_error(error.message());
             Err(error)
         }
     }
@@ -431,7 +432,7 @@ where
                         dll: Box::new(dll.error),
                         exe: Box::new(exe.error),
                     };
-                    profile.push_error(error.to_string());
+                    profile.push_error(error.message());
                     Err(error)
                 }
             }
@@ -453,7 +454,7 @@ fn record_rejected(profile: &mut ProtectionProfile, layout: LayoutKind, failure:
             profile_messages(report, ProfileSeverity::Warning),
             profile_messages(report, ProfileSeverity::Fatal),
         ),
-        None => (Vec::new(), vec![failure.error.to_string()]),
+        None => (Vec::new(), vec![failure.error.message()]),
     };
     let outcome = if failure.report.is_some() {
         AttemptOutcome::Rejected
@@ -463,7 +464,7 @@ fn record_rejected(profile: &mut ProtectionProfile, layout: LayoutKind, failure:
     profile.record_attempt(layout, outcome, warnings, errors);
 }
 
-fn profile_messages(report: &IntegrityReport, severity: ProfileSeverity) -> Vec<String> {
+fn profile_messages(report: &IntegrityReport, severity: ProfileSeverity) -> Vec<Message> {
     report
         .findings
         .iter()
@@ -1165,13 +1166,13 @@ mod dll_layout_selection {
     fn profiled_entrypoints_reject_unknown_input_with_evidence() {
         let sample = vec![0_u8; 64];
         let (profile, result) = unpack_auto_profiled(&sample);
-        assert!(matches!(result, Err(UnpackError::NotCrackproof)));
+        assert!(matches!(result, Err(UnpackError::NotCrackProof)));
         assert_eq!(profile.recognition, RecognitionStatus::NotRecognized);
         assert!(profile.candidates.is_empty());
         assert!(!profile.errors.is_empty());
 
         let (profile, result) = unpack_exe_profiled(&sample);
-        assert!(matches!(result, Err(UnpackError::NotCrackproof)));
+        assert!(matches!(result, Err(UnpackError::NotCrackProof)));
         assert_eq!(profile.recognition, RecognitionStatus::NotRecognized);
         assert!(!profile.errors.is_empty());
     }
