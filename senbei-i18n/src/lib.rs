@@ -8,7 +8,7 @@
 //! `deny(unused_variables)`) an argument a translation leaves out.
 //!
 //! English is the wording the engine has always produced. Reports, logs, and
-//! `--json` output stay English; only console and GUI text is localized.
+//! `--json` output stay English; only console text is localized.
 #![deny(unused_variables)]
 #![forbid(unsafe_code)]
 
