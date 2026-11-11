@@ -2628,15 +2628,33 @@ mod tests {
     /// replace the output root and write back over the source tree.
     #[test]
     fn rel_in_tree_falls_back_to_file_name_outside_root() {
-        let root = Path::new(r"D:\out-of-tree-root");
-        let abs = Path::new(r"C:\game\bin\app.exe");
-        let rel = rel_in_tree(root, abs);
-        assert_eq!(rel.as_ref(), Path::new("app.exe"));
+        // The paths must use the host's syntax. On a POSIX host a Windows path
+        // is one file-name component, so `file_name()` would return the whole
+        // string and the fallback assertion would pass vacuously.
+        #[cfg(windows)]
+        {
+            let root = Path::new(r"D:\out-of-tree-root");
+            let abs = Path::new(r"C:\game\bin\app.exe");
+            let rel = rel_in_tree(root, abs);
+            assert_eq!(rel.as_ref(), Path::new("app.exe"));
 
-        // And the normal case still preserves the tree structure.
-        let under = Path::new(r"D:\out-of-tree-root\bin\app.exe");
-        let rel = rel_in_tree(root, under);
-        assert_eq!(rel.as_ref(), Path::new(r"bin\app.exe"));
+            // And the normal case still preserves the tree structure.
+            let under = Path::new(r"D:\out-of-tree-root\bin\app.exe");
+            let rel = rel_in_tree(root, under);
+            assert_eq!(rel.as_ref(), Path::new(r"bin\app.exe"));
+        }
+        #[cfg(unix)]
+        {
+            let root = Path::new("/mnt/out-of-tree-root");
+            let abs = Path::new("/opt/game/bin/app.exe");
+            let rel = rel_in_tree(root, abs);
+            assert_eq!(rel.as_ref(), Path::new("app.exe"));
+
+            // And the normal case still preserves the tree structure.
+            let under = Path::new("/mnt/out-of-tree-root/bin/app.exe");
+            let rel = rel_in_tree(root, under);
+            assert_eq!(rel.as_ref(), Path::new("bin/app.exe"));
+        }
     }
 
     /// A restore's validation diagnostics reach the JSON report: the profile's
